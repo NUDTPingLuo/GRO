@@ -31,9 +31,6 @@ def res_eval():
         recorder.load(os.path.join(args.sys_res_root, f), label=f)
     # recorder.plot()
     recorder.plot_mean()
-    # recorder.plot_ecgr_beta_compare()
-    # recorder.save_final_acc_to_csv()
-    plt.show()
 
 
 if __name__ == "__main__":
