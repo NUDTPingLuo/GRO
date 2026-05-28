@@ -43,7 +43,7 @@ def assign_dataset(dataset_name):
         image_dim = 32
         image_channel = 3
 
-    elif dataset_name == 'IMAGENET':
+    elif dataset_name == 'ImageNet':
         num_class = 200
         image_dim = 64
         image_channel = 3
@@ -98,8 +98,8 @@ def init_model(model_name, num_class, image_channel):
         model = AlexCifarNet()
 
     # === 新增：LC25000 模型 ===
-    elif model_name == "ResNet18_LC25000":
-        model = resnet18_LC25000(num_classes=num_class, in_channels=image_channel)
+    elif model_name == "ResNet18_HAM10000":
+        model = generate_resnet_ham10000()
         # model = mobilenetv3_LC25000(num_classes=num_class)
         # model = efficientnet_b0_LC25000(num_classes=num_class)
 

@@ -4,12 +4,10 @@ import torch.nn.functional as F
 import torchvision.models as models
 import numpy as np
 from collections import OrderedDict
-from torchvision.models import resnet18, ResNet18_Weights, resnet50
-from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
-from torchvision.models import mobilenet_v3_small
-
-from torchvision.models import ResNet101_Weights, ResNet34_Weights, ResNet18_Weights, ResNet50_Weights, \
-    ResNet152_Weights
+from torchvision.models import (
+    ResNet18_Weights, ResNet34_Weights, ResNet50_Weights,
+    ResNet101_Weights, ResNet152_Weights
+)
 
 """
 We provide the models, which might be used in the experiments on FedD3, as follows:
@@ -92,92 +90,99 @@ class CNN_MNIST(nn.Module):
         x = self.fc2(x)
         return x
 
-# Further ResNet models
-def generate_resnet(num_classes=200, in_channels=1, model_name="ResNet18"):
-    if model_name == "ResNet18":
-        model = models.resnet18(weights=None)
-    elif model_name == "ResNet34":
-        model = models.resnet34(weights=ResNet34_Weights.DEFAULT)
-    elif model_name == "ResNet50":
-        model = models.resnet50(weights=ResNet50_Weights.DEFAULT)
-    elif model_name == "ResNet101":
-        model = models.resnet101(weights=ResNet101_Weights.DEFAULT)
-    elif model_name == "ResNet152":
-        model = models.resnet152(weights=ResNet152_Weights.DEFAULT)
-    model.conv1 = nn.Conv2d(in_channels, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+# Further ResNet for ImageNet
+# def generate_resnet(num_classes=200, in_channels=3, model_name="ResNet18"):
+#     # 1. 动态加载模型和预训练权重
+#     weights_dict = {
+#         "ResNet18": ResNet18_Weights.DEFAULT,
+#         "ResNet34": ResNet34_Weights.DEFAULT,
+#         "ResNet50": ResNet50_Weights.DEFAULT,
+#         "ResNet101": ResNet101_Weights.DEFAULT,
+#         "ResNet152": ResNet152_Weights.DEFAULT
+#     }
+#
+#     if model_name not in weights_dict:
+#         raise ValueError(f"Unsupported model_name: {model_name}")
+#
+#     model_func = getattr(models, model_name.lower())
+#     model = model_func(weights=weights_dict[model_name])
+#
+#     # 2. 折中版核心改造 (针对 Tiny ImageNet 64x64)
+#     # 采用 3x3 卷积，stride=2 进行一次温和的降采样 (64x64 -> 32x32)
+#     model.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, stride=2, padding=1, bias=False)
+#
+#     # 移除 maxpool，防止发生破坏性的二次降采样
+#     model.maxpool = nn.Identity()
+#
+#     # 3. 替换分类头
+#     fc_features = model.fc.in_features
+#     model.fc = nn.Linear(fc_features, num_classes)
+#
+#     return model
+
+# LC25000
+def generate_resnet(num_classes=5,
+                    in_channels=3,
+                    model_name="ResNet18"):
+
+    weights = {
+        "ResNet18": ResNet18_Weights.DEFAULT,
+        "ResNet34": ResNet34_Weights.DEFAULT,
+        "ResNet50": ResNet50_Weights.DEFAULT,
+    }
+
+    model = getattr(models, model_name.lower())(
+        weights=weights[model_name]
+    )
+
+    # LC25000 适配
+    model.conv1 = nn.Conv2d(
+        in_channels,
+        64,
+        kernel_size=3,
+        stride=1,
+        padding=1,
+        bias=False
+    )
+
+    # 保留 maxpool（速度更平衡）
+
+    model.fc = nn.Linear(
+        model.fc.in_features,
+        num_classes
+    )
+
+    return model
+
+def generate_resnet_ham10000(
+        num_classes=7,
+        model_name="ResNet18"
+):
+
+    weights_dict = {
+        "ResNet18": None,
+        "ResNet34": ResNet34_Weights.DEFAULT,
+        "ResNet50": ResNet50_Weights.DEFAULT,
+        "ResNet101": ResNet101_Weights.DEFAULT,
+        "ResNet152": ResNet152_Weights.DEFAULT
+    }
+
+    if model_name not in weights_dict:
+        raise ValueError(f"Unsupported model_name: {model_name}")
+
+    model_func = getattr(models, model_name.lower())
+
+    # ===== 使用 ImageNet 预训练 =====
+    model = model_func(weights=weights_dict[model_name])
+
+    # ===== 不修改 conv1 =====
+    # HAM10000 非常适合原生 ResNet
+
+    # ===== 替换分类头 =====
     fc_features = model.fc.in_features
     model.fc = nn.Linear(fc_features, num_classes)
 
     return model
-
-
-# def resnet18_LC25000(num_classes=5, in_channels=3, pretrained=False, freeze_backbone=False):
-#     # 使用官方预训练权重
-#     model = resnet18(weights="IMAGENET1K_V1" if pretrained else None)
-#
-#     # 替换最后的全连接层
-#     model.fc = nn.Linear(model.fc.in_features, num_classes)
-#
-#     # 可选：冻结特征提取层，只训练分类头（适合小数据集）
-#     if freeze_backbone:
-#         for name, param in model.named_parameters():
-#             if not name.startswith("fc"):
-#                 param.requires_grad = False
-#
-#     return model
-
-# def efficientnet_b0_LC25000(num_classes=5, in_channels=3, pretrained=False, freeze_backbone=False):
-#     """
-#     EfficientNet-B0 for LC25000 classification.
-#     Args:
-#         num_classes: 输出类别数
-#         in_channels: 输入通道（默认3）
-#         pretrained: 是否加载 ImageNet 预训练权重
-#         freeze_backbone: 是否冻结 backbone
-#     """
-#     # ---- 加载官方预训练模型 ----
-#     model = efficientnet_b0(
-#         weights=EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
-#     )
-#
-#     # ---- 如果输入通道不是3，需要修改第一个卷积层 ----
-#     if in_channels != 3:
-#         old_conv = model.features[0][0]
-#         model.features[0][0] = nn.Conv2d(
-#             in_channels,
-#             old_conv.out_channels,
-#             kernel_size=old_conv.kernel_size,
-#             stride=old_conv.stride,
-#             padding=old_conv.padding,
-#             bias=False
-#         )
-#
-#     # ---- 修改分类层 (classifier) ----
-#     # EfficientNet 的 classifier 结构是：
-#     # model.classifier = Sequential(
-#     #     Dropout(p=0.2),
-#     #     Linear(1280 -> 1000)
-#     # )
-#     in_features = model.classifier[1].in_features
-#     model.classifier[1] = nn.Linear(in_features, num_classes)
-#
-#     # ---- 冻结 backbone，仅训练分类头 ----
-#     if freeze_backbone:
-#         for name, param in model.named_parameters():
-#             if not name.startswith("classifier"):
-#                 param.requires_grad = False
-#
-#     return model
-#
-# def mobilenetv3_LC25000(num_classes=5, pretrained=False, freeze_backbone=False):
-#     model = mobilenet_v3_small(weights="IMAGENET1K_V1" if pretrained else None)
-#     model.classifier[3] = torch.nn.Linear(model.classifier[3].in_features, num_classes)
-#
-#     if freeze_backbone:
-#         for name, param in model.named_parameters():
-#             if not name.startswith("classifier"):
-#                 param.requires_grad = False
-#     return model
 
 # Further Vgg models
 def generate_vgg(num_classes=5, in_channels=1, model_name="vgg11"):
