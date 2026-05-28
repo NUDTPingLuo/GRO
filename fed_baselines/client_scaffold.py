@@ -1,6 +1,7 @@
 from fed_baselines.client_base import FedClient
 import copy
 from utils.models import *
+import math
 
 from torch.utils.data import DataLoader
 from utils.fed_utils import init_model
@@ -14,18 +15,22 @@ class ScaffoldClient(FedClient):
         # client control variate
         self.ccv = init_model(model_name=self.model_name, num_class=self._num_class, image_channel=self._image_channel)
         self.init_lr = self._lr
+        ccv_state = self.ccv.state_dict()
+        for key in ccv_state:
+            ccv_state[key] = torch.zeros_like(ccv_state[key])
+        self.ccv.load_state_dict(ccv_state)
 
-    def update(self, global_round, model_state_dict, scv_state):
+    def update(self, global_round, max_rounds, model_state_dict, scv_state):
         """
         SCAFFOLD client updates local models and server control variate
         :param model_state_dict:
         :param scv_state:
         """
-        if (global_round + 1) % 10 == 0:
-            self._lr = self._lr / 2
-
-        # self._lr = self.init_lr * (1 - global_round / 100)
-        # print('lr:', self._lr)
+        # 余弦退火公式: lr_t = eta_min + 0.5 * (lr_max - eta_min) * (1 + cos(pi * current_round / total_round))
+        eta_min = 0.0
+        self._lr = eta_min + 0.5 * (self.init_lr - eta_min) * (
+                1 + math.cos(math.pi * global_round / max_rounds)
+        )
 
         self.model = init_model(model_name=self.model_name, num_class=self._num_class, image_channel=self._image_channel)
         self.model.load_state_dict(model_state_dict)
@@ -69,10 +74,11 @@ class ScaffoldClient(FedClient):
                     loss.backward()
                     optimizer.step()
 
-                    state_dict = self.model.state_dict()
-                    for key in state_dict:
-                        state_dict[key] = state_dict[key] - self._lr * (scv_state[key] - ccv_state[key])
-                    self.model.load_state_dict(state_dict)
+                    with torch.no_grad():
+                        for name, param in self.model.named_parameters():
+                            # 注意：只修正参数，不碰 BatchNorm 统计量
+                            param.data = param.data - self._lr * (
+                                        scv_state[name].to(self._device) - ccv_state[name].to(self._device))
 
                     cnt += 1
                     epoch_loss_collector.append(loss.item())
@@ -89,4 +95,4 @@ class ScaffoldClient(FedClient):
 
         self.ccv.load_state_dict(new_ccv_state)
 
-        return state_dict, self.n_data, loss.data.cpu().numpy(), new_ccv_state
+        return state_dict, self.n_data, loss.data.cpu().numpy(), delta_ccv_state

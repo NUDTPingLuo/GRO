@@ -2,6 +2,17 @@ from utils.models import *
 import torch
 from torch.utils.data import DataLoader
 from utils.fed_utils import assign_dataset, init_model
+from torch.utils.data import DataLoader
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score
+)
+from sklearn.preprocessing import label_binarize
+import torch.nn.functional as F
+
 
 
 class FedServer(object):
@@ -55,25 +66,98 @@ class FedServer(object):
 
     def test(self):
         """
-        Server tests the model on test dataset.
+        Server tests the global model.
+        Returns:
+            Acc / F1 / Recall / Precision / AUC
         """
-        test_loader = DataLoader(self.testset, batch_size=self._batch_size, shuffle=False, num_workers=8, pin_memory=True, persistent_workers=False)
+        test_loader = DataLoader(
+            self.testset,
+            batch_size=self._batch_size,
+            shuffle=False,
+            num_workers=8,
+            pin_memory=True,
+            persistent_workers=False
+        )
         self.model.to(self._device)
         self.model.eval()
-
-        correct = 0
-        total = 0
-
+        all_labels = []
+        all_preds = []
+        all_probs = []
         with torch.no_grad():
             for x, y in test_loader:
-                x, y = x.to(self._device), y.to(self._device)
+                x = x.to(self._device)
+                y = y.to(self._device)
                 outputs = self.model(x)
-                _, predicted = torch.max(outputs, 1)
-                correct += (predicted == y).sum().item()
-                total += y.size(0)
-
-        accuracy = correct / total
-        return accuracy
+                # =========================
+                # 防止 NaN / Inf
+                # =========================
+                outputs = torch.nan_to_num(
+                    outputs,
+                    nan=0.0,
+                    posinf=1e6,
+                    neginf=-1e6
+                )
+                probs = F.softmax(outputs, dim=1)
+                probs = torch.nan_to_num(
+                    probs,
+                    nan=0.0,
+                    posinf=1.0,
+                    neginf=0.0
+                )
+                _, predicted = torch.max(probs, 1)
+                all_labels.extend(y.cpu().numpy())
+                all_preds.extend(predicted.cpu().numpy())
+                all_probs.extend(probs.cpu().numpy())
+        all_labels = np.array(all_labels)
+        all_preds = np.array(all_preds)
+        all_probs = np.array(all_probs)
+        # =========================
+        # Metrics
+        # =========================
+        acc = (all_preds == all_labels).mean()
+        f1 = f1_score(
+            all_labels,
+            all_preds,
+            average='macro',
+            zero_division=0
+        )
+        recall = recall_score(
+            all_labels,
+            all_preds,
+            average='macro',
+            zero_division=0
+        )
+        precision = precision_score(
+            all_labels,
+            all_preds,
+            average='macro',
+            zero_division=0
+        )
+        # =========================
+        # AUC
+        # =========================
+        try:
+            if len(np.unique(all_labels)) == 2:
+                auc = roc_auc_score(
+                    all_labels,
+                    all_probs[:, 1]
+                )
+            else:
+                auc = roc_auc_score(
+                    all_labels,
+                    all_probs,
+                    multi_class='ovr'
+                )
+        except Exception as e:
+            print(f"[Warning] AUC computation failed: {e}")
+            auc = 0.0
+        return {
+            "Acc": float(acc),
+            "F1": float(f1),
+            "Recall": float(recall),
+            "Precision": float(precision),
+            "AUC": float(auc)
+        }
 
     def select_clients(self, connection_ratio=1):
         """

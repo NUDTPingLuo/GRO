@@ -1,6 +1,7 @@
 from utils.models import *
 from torch.utils.data import DataLoader
 from utils.fed_utils import assign_dataset, init_model
+import math
 
 
 class FedClient(object):
@@ -49,18 +50,24 @@ class FedClient(object):
         self.trainset = trainset
         self.n_data = len(trainset)
 
-    def update(self, global_round, model_state_dict):
+    def update(self, global_round, max_rounds, model_state_dict):
         """
-        Client updates the model from the server.
+        Client updates the model from the server with Cosine Annealing LR.
+        :param global_round: Current global training round
+        :param max_rounds: Total number of global rounds
         :param model_state_dict: Global model.
         """
-        if (global_round + 1) % 10 == 0:
-            self._lr = self._lr / 2
+        # ==========================================
+        # 核心修改：余弦退火学习率 (Cosine Annealing)
+        # ==========================================
+        progress = global_round / max_rounds
+        eta_min = 0.0  # 学习率下限，可以根据需要设为 1e-4 或 1e-5
 
-        # self._lr = self.init_lr * (1 - global_round / 100)
-        # print('lr:', self._lr)
+        self._lr = eta_min + 0.5 * (self.init_lr - eta_min) * (1 + math.cos(math.pi * progress))
+        # print(f"[Client {self.name}] Round {global_round}/{max_rounds} - LR: {self._lr:.6f}")
 
-        self.model = init_model(model_name=self.model_name, num_class=self._num_class, image_channel=self._image_channel)
+        self.model = init_model(model_name=self.model_name, num_class=self._num_class,
+                                image_channel=self._image_channel)
         self.model.load_state_dict(model_state_dict)
 
     def train(self):
