@@ -12,17 +12,17 @@ from fed_baselines.client_base import FedClient
 from fed_baselines.client_fedprox import FedProxClient
 from fed_baselines.client_scaffold import ScaffoldClient
 from fed_baselines.client_fednova import FedNovaClient
-from fed_baselines.client_ecgr import ECGRClient
-from fed_baselines.client_scaffold_ecgr import ScaffoldECGRClient
-from fed_baselines.client_fednova_ecgr import FedNovaECGRClient
-from fed_baselines.client_fedprox_ecgr import FedProxECGRClient
+from fed_baselines.client_gro import GROClient
+from fed_baselines.client_scaffold_gro import ScaffoldGROClient
+from fed_baselines.client_fednova_gro import FedNovaGROClient
+from fed_baselines.client_fedprox_gro import FedProxGROClient
 from fed_baselines.server_base import FedServer
 from fed_baselines.server_scaffold import ScaffoldServer
 from fed_baselines.server_fednova import FedNovaServer
-from fed_baselines.server_ecgr import ECGRServer
+from fed_baselines.server_gro import GROServer
 
 from postprocessing.recorder import Recorder
-from preprocessing.baselines_dataloader import divide_data, divide_data_dirichlet
+from preprocessing.baselines_dataloader import divide_data_dirichlet
 from utils.models import *
 
 json_types = (list, dict, str, int, float, bool, type(None))
@@ -41,17 +41,37 @@ class PythonObjectEncoder(JSONEncoder):
         return {'_python_object': pickle.dumps(obj).decode('latin-1')}
 
 
-def as_python_object(dct):
-    if '_python_object' in dct:
-        return pickle.loads(dct['_python_object'].encode('latin-1'))
-    return dct
-
-
 def fed_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True, help='Yaml file for configuration')
     args = parser.parse_args()
     return args
+
+
+# ==========================================
+# 🚀 算法组件注册表 (工厂模式)
+# ==========================================
+CLIENT_REGISTRY = {
+    "FedAvg": FedClient,
+    "Scaffold": ScaffoldClient,
+    "FedProx": FedProxClient,
+    "FedNova": FedNovaClient,
+    "FedAvgGRO": GROClient,
+    "ScaffoldGRO": ScaffoldGROClient,
+    "FedProxGRO": FedProxGROClient,
+    "FedNovaGRO": FedNovaGROClient
+}
+
+SERVER_REGISTRY = {
+    "FedAvg": FedServer,
+    "FedProx": FedServer,
+    "FedProxGRO": FedServer,
+    "Scaffold": ScaffoldServer,
+    "ScaffoldGRO": ScaffoldServer,
+    "FedNova": FedNovaServer,
+    "FedNovaGRO": FedNovaServer,
+    "FedAvgGRO": GROServer
+}
 
 
 def fed_run():
@@ -62,213 +82,201 @@ def fed_run():
         except yaml.YAMLError as exc:
             print(exc)
 
-    # ✅ 支持的算法
-    algo_list = ["FedAvg", "Scaffold", "FedProx", "FedNova", "FedAvgECGR", "ScaffoldECGR", "FedProxECGR", "FedNovaECGR"]
-    assert config["client"]["fed_algo"] in algo_list, "The federated learning algorithm is not supported"
+    fed_algo = config["client"]["fed_algo"]
+    dataset = config["system"]["dataset"]
+    model_name = config["system"]["model"]
 
-    dataset_list = ['MNIST', 'CIFAR10', 'FashionMNIST', 'SVHN', 'CIFAR100', 'IMAGENET', 'LC25000']
-    assert config["system"]["dataset"] in dataset_list, "The dataset is not supported"
-
-    model_list = ["LeNet",'CNN_MNIST', 'AlexCifarNet', "ResNet18", 'VGG11', "CNN", 'ResNet18_LC25000']
-    assert config["system"]["model"] in model_list, "The model is not supported"
+    assert fed_algo in CLIENT_REGISTRY, "The federated learning algorithm is not supported"
+    assert dataset in ['MNIST', 'CIFAR10', 'FashionMNIST', 'SVHN', 'CIFAR100', 'ImageNet',
+                       'LC25000','HAM10000'], "The dataset is not supported"
+    assert model_name in ["LeNet", 'CNN_MNIST', 'AlexCifarNet', "ResNet18", 'VGG11', "CNN",
+                          'ResNet18_HAM10000'], "The model is not supported"
 
     np.random.seed(config["system"]["i_seed"])
     torch.manual_seed(config["system"]["i_seed"])
     random.seed(config["system"]["i_seed"])
 
-    client_dict = {}
     recorder = Recorder()
+    trainset_config, testset = divide_data_dirichlet(
+        num_client=config["system"]["num_client"],
+        alpha=config["system"]["dirichlet_alpha"],
+        dataset_name=dataset,
+        i_seed=config["system"]["i_seed"]
+    )
 
-    trainset_config, testset = divide_data_dirichlet(num_client=config["system"]["num_client"],
-                                                     alpha=config["system"]["dirichlet_alpha"],
-                                                     dataset_name=config["system"]["dataset"],
-                                                     i_seed=config["system"]["i_seed"])
     max_acc = 0
+    max_f1 = 0.0
+    max_auc = 0.0
+    client_dict = {}
 
-    # ✅ 初始化 Client
+    # ==========================================
+    # ✅ 优雅地初始化 Clients (已彻底移除 Beta)
+    # ==========================================
+    client_class = CLIENT_REGISTRY[fed_algo]
+    base_kwargs = {
+        "dataset_id": dataset,
+        "epoch": config["client"]["num_local_epoch"],
+        "model_name": model_name,
+        "lr": config["client"]["lr"],
+        "batch_size": config["client"]["batch_size"],
+        "momentum": config["client"]["momentum"]
+    }
+
     for client_id in trainset_config['users']:
-        if config["client"]["fed_algo"] == 'FedAvg':
-            client_dict[client_id] = FedClient(client_id, dataset_id=config["system"]["dataset"],
-                                               epoch=config["client"]["num_local_epoch"],
-                                               model_name=config["system"]["model"],
-                                               lr=config["client"]["lr"],
-                                               batch_size=config["client"]["batch_size"],
-                                               momentum=config["client"]["momentum"]
-                                               )
-        elif config["client"]["fed_algo"] == 'FedAvgECGR':
-            client_dict[client_id] = ECGRClient(client_id, dataset_id=config["system"]["dataset"],
-                                                 epoch=config["client"]["num_local_epoch"],
-                                                 model_name=config["system"]["model"],
-                                                lr=config["client"]["lr"],
-                                                batch_size=config["client"]["batch_size"],
-                                                momentum=config["client"]["momentum"],
-                                                beta=config["system"]["extraction_beta"]
-                                                )
-        elif config["client"]["fed_algo"] == 'Scaffold':
-            client_dict[client_id] = ScaffoldClient(client_id, dataset_id=config["system"]["dataset"],
-                                                    epoch=config["client"]["num_local_epoch"],
-                                                    model_name=config["system"]["model"],
-                                                    lr=config["client"]["lr"],
-                                                    batch_size=config["client"]["batch_size"],
-                                                    momentum=config["client"]["momentum"]
-                                                    )
-        elif config["client"]["fed_algo"] == 'ScaffoldECGR':
-            client_dict[client_id] = ScaffoldECGRClient(client_id, dataset_id=config["system"]["dataset"],
-                                                         epoch=config["client"]["num_local_epoch"],
-                                                         model_name=config["system"]["model"],
-                                                        lr=config["client"]["lr"],
-                                                        batch_size=config["client"]["batch_size"],
-                                                        momentum=config["client"]["momentum"],
-                                                        beta=config["system"]["extraction_beta"]
-                                                        )
-        elif config["client"]["fed_algo"] == 'FedProx':
-            client_dict[client_id] = FedProxClient(client_id, dataset_id=config["system"]["dataset"],
-                                                   epoch=config["client"]["num_local_epoch"],
-                                                   model_name=config["system"]["model"],
-                                                   lr=config["client"]["lr"],
-                                                   batch_size=config["client"]["batch_size"],
-                                                   momentum=config["client"]["momentum"]
-                                                   )
-        elif config["client"]["fed_algo"] == 'FedProxECGR':
-            client_dict[client_id] = FedProxECGRClient(client_id, dataset_id=config["system"]["dataset"],
-                                                   epoch=config["client"]["num_local_epoch"],
-                                                   model_name=config["system"]["model"],
-                                                   lr=config["client"]["lr"],
-                                                   batch_size=config["client"]["batch_size"],
-                                                   momentum=config["client"]["momentum"],
-                                                    beta=config["system"]["extraction_beta"]
-                                                   )
-        elif config["client"]["fed_algo"] == 'FedNova':
-            client_dict[client_id] = FedNovaClient(client_id, dataset_id=config["system"]["dataset"],
-                                                   epoch=config["client"]["num_local_epoch"],
-                                                   model_name=config["system"]["model"],
-                                                   lr=config["client"]["lr"],
-                                                   batch_size=config["client"]["batch_size"],
-                                                   momentum=config["client"]["momentum"]
-                                                   )
-        elif config["client"]["fed_algo"] == 'FedNovaECGR':
-            client_dict[client_id] = FedNovaECGRClient(client_id, dataset_id=config["system"]["dataset"],
-                                                   epoch=config["client"]["num_local_epoch"],
-                                                   model_name=config["system"]["model"],
-                                                   lr=config["client"]["lr"],
-                                                   batch_size=config["client"]["batch_size"],
-                                                   momentum=config["client"]["momentum"],
-                                                   beta=config["system"]["extraction_beta"]
-                                                   )
+        # 动态实例化对应的 Client
+        client_dict[client_id] = client_class(name=client_id, **base_kwargs)
         client_dict[client_id].load_trainset(trainset_config['user_data'][client_id])
 
-    # ✅ 初始化 Server
-    if config["client"]["fed_algo"] == 'FedAvg':
-        fed_server = FedServer(trainset_config['users'], dataset_id=config["system"]["dataset"],
-                               model_name=config["system"]["model"],
-                               batch_size=config["client"]["batch_size"])
-    elif config["client"]["fed_algo"] == 'FedAvgECGR':
-        fed_server = ECGRServer(trainset_config['users'], dataset_id=config["system"]["dataset"],
-                                 model_name=config["system"]["model"],
-                                batch_size=config["client"]["batch_size"])
-    elif config["client"]["fed_algo"] == 'Scaffold' or config["client"]["fed_algo"] == 'ScaffoldECGR':
-        fed_server = ScaffoldServer(trainset_config['users'], dataset_id=config["system"]["dataset"],
-                                    model_name=config["system"]["model"],
-                                    batch_size=config["client"]["batch_size"])
-        scv_state = fed_server.scv.state_dict()
-    elif config["client"]["fed_algo"] == 'FedProx' or config["client"]["fed_algo"] == 'FedProxECGR':
-        fed_server = FedServer(trainset_config['users'], dataset_id=config["system"]["dataset"],
-                               model_name=config["system"]["model"],
-                               batch_size=config["client"]["batch_size"])
-    elif config["client"]["fed_algo"] == 'FedNova' or config["client"]["fed_algo"] == 'FedNovaECGR':
-        fed_server = FedNovaServer(trainset_config['users'], dataset_id=config["system"]["dataset"],
-                                   model_name=config["system"]["model"],
-                                   batch_size=config["client"]["batch_size"])
-
-
-
+    # ==========================================
+    # ✅ 优雅地初始化 Server
+    # ==========================================
+    server_class = SERVER_REGISTRY[fed_algo]
+    fed_server = server_class(
+        client_list=trainset_config['users'],
+        dataset_id=dataset,
+        model_name=model_name,
+        batch_size=config["client"]["batch_size"]
+    )
     fed_server.load_testset(testset)
+
     global_state_dict = fed_server.state_dict()
+    scv_state = fed_server.scv.state_dict() if "Scaffold" in fed_algo else None
 
+    # ==========================================
     # ✅ 主训练循环
-    pbar = tqdm(range(config["system"]["num_round"]))
+    # ==========================================
+    max_rounds = config["system"]["num_round"]
+    pbar = tqdm(range(max_rounds))
+
     for global_round in pbar:
+
         for client_id in trainset_config['users']:
-            if config["client"]["fed_algo"] == 'FedAvg':
-                client_dict[client_id].update(global_round, global_state_dict)
-                state_dict, n_data, loss = client_dict[client_id].train()
-                fed_server.rec(client_dict[client_id].name, state_dict, n_data, loss)
 
-            elif config["client"]["fed_algo"] == 'FedAvgECGR':
-                client_dict[client_id].update(global_round, global_state_dict)
-                global_avg_grad = getattr(fed_server, "global_avg_grad", None)
-                final_grad, n_data, loss, indices_division = client_dict[client_id].train(global_avg_grad=global_avg_grad)
-                fed_server.rec(client_dict[client_id].name, final_grad, n_data, loss, indices_division)
+            client = client_dict[client_id]
 
-            elif config["client"]["fed_algo"] == 'Scaffold' or config["client"]["fed_algo"] == 'ScaffoldECGR':
-                client_dict[client_id].update(global_round, global_state_dict, scv_state)
-                state_dict, n_data, loss, delta_ccv_state = client_dict[client_id].train()
-                fed_server.rec(client_dict[client_id].name, state_dict, n_data, loss, delta_ccv_state)
+            # ==========================================
+            # 1. Dynamic Update
+            # ==========================================
+            if "Scaffold" in fed_algo:
+                client.update(
+                    global_round,
+                    max_rounds,
+                    global_state_dict,
+                    scv_state
+                )
+            else:
+                client.update(
+                    global_round,
+                    max_rounds,
+                    global_state_dict
+                )
 
-            elif config["client"]["fed_algo"] == 'FedProx' or config["client"]["fed_algo"] == 'FedProxECGR':
-                client_dict[client_id].update(global_round, global_state_dict)
-                state_dict, n_data, loss = client_dict[client_id].train()
-                fed_server.rec(client_dict[client_id].name, state_dict, n_data, loss)
+            # ==========================================
+            # 2. Dynamic Train
+            # ==========================================
+            if fed_algo == 'FedAvgGRO':
 
-            elif config["client"]["fed_algo"] == 'FedNova' or config["client"]["fed_algo"] == 'FedNovaECGR':
-                client_dict[client_id].update(global_round, global_state_dict)
-                state_dict, n_data, loss, coeff, norm_grad = client_dict[client_id].train()
-                fed_server.rec(client_dict[client_id].name, state_dict, n_data, loss, coeff, norm_grad)
+                global_avg_grad = getattr(
+                    fed_server,
+                    "global_avg_grad",
+                    None
+                )
 
-        # ✅ 聚合
+                results = client.train(
+                    global_avg_grad=global_avg_grad
+                )
+
+            else:
+                results = client.train()
+
+            # ==========================================
+            # 3. Receive Client Updates
+            # ==========================================
+            fed_server.rec(client.name, *results)
+
+        # ==========================================
+        # 4. Server Aggregation
+        # ==========================================
         fed_server.select_clients()
-        if config["client"]["fed_algo"] == 'FedAvg':
-            global_state_dict, avg_loss, _ = fed_server.agg()
-        elif config["client"]["fed_algo"] == 'FedAvgECGR':
-            global_state_dict, avg_loss, _ = fed_server.agg()
-        elif config["client"]["fed_algo"] == 'Scaffold' or config["client"]["fed_algo"] == 'ScaffoldECGR':
-            global_state_dict, avg_loss, _, scv_state = fed_server.agg()
-        elif config["client"]["fed_algo"] == 'FedProx' or config["client"]["fed_algo"] == 'FedProxECGR':
-            global_state_dict, avg_loss, _ = fed_server.agg()
-        elif config["client"]["fed_algo"] == 'FedNova' or config["client"]["fed_algo"] == 'FedNovaECGR':
-            global_state_dict, avg_loss, _ = fed_server.agg()
 
-        # ✅ 测试 & 清空
-        accuracy = fed_server.test()
+        agg_results = fed_server.agg()
+
+        global_state_dict = agg_results[0]
+        avg_loss = agg_results[1]
+
+        if "Scaffold" in fed_algo:
+            scv_state = agg_results[3]
+
+        # ==========================================
+        # 5. Test
+        # ==========================================
+        metrics = fed_server.test()
+
         fed_server.flush()
 
-        recorder.res['server']['iid_accuracy'].append(accuracy)
+        acc = metrics["Acc"]
+        f1 = metrics["F1"]
+        recall = metrics["Recall"]
+        precision = metrics["Precision"]
+        auc = metrics["AUC"]
+
+        # ==========================================
+        # 6. Record Metrics
+        # ==========================================
+        recorder.res['server']['Acc'].append(acc)
+        recorder.res['server']['F1'].append(f1)
+        recorder.res['server']['Recall'].append(recall)
+        recorder.res['server']['Precision'].append(precision)
+        recorder.res['server']['AUC'].append(auc)
+
         recorder.res['server']['train_loss'].append(avg_loss)
 
-        if max_acc < accuracy:
-            max_acc = accuracy
+        max_acc = max(max_acc, acc)
+        max_f1 = max(max_f1, f1)
+        max_auc = max(max_auc, auc)
+
+        recorder.res['server']['max_Acc'] = max_acc
+        recorder.res['server']['max_F1'] = max_f1
+        recorder.res['server']['max_AUC'] = max_auc
+
+        # ==========================================
+        # 7. Progress Bar
+        # ==========================================
         pbar.set_description(
-            f'Global Round: {global_round} | Train loss: {avg_loss:.4f} | Accuracy: {accuracy:.4f} | Max Acc: {max_acc:.4f}')
+            f'Round: {global_round} | '
+            f'Loss: {avg_loss:.4f} | '
+            f'Acc: {acc:.4f} | '
+            f'F1: {f1:.4f} | '
+            f'AUC: {auc:.4f} | '
+            f'Max Acc: {max_acc:.4f}'
+        )
 
-        # ✅ 保存结果
-        if not os.path.exists(config["system"]["res_root"]):
-            os.makedirs(config["system"]["res_root"])
+    # ==========================================
+    # ✅ 保存结果
+    # ==========================================
+    alpha = config["system"]["dirichlet_alpha"]
+    lr = config["client"]["lr"]
+    random_seed = config["system"]["i_seed"]
+    algo_clean = fed_algo.replace("GRO", "")
 
-        fed_algo = config["client"]["fed_algo"]
-        dataset = config["system"]["dataset"]
-        lr = config["client"]["lr"]
-        alpha = config["system"]["dirichlet_alpha"]
-        beta = config["system"]["extraction_beta"]
-        random_seed = config["system"]["i_seed"]
+    file_name = f"['{fed_algo}','{dataset}','alpha{alpha}','lr{lr}','seed{random_seed}']"
 
-        # 标准字符串拼接方式：每个字段都加单引号并用逗号隔开
-        file_name = f"['{fed_algo}','{dataset}','alpha{alpha}','lr{lr}','beta{beta}','seed{random_seed}']"
+    # 严格保留你要求的路径结构
+    save_dir = os.path.join(
+        config["system"]["res_root"],
+        dataset,
+        f"alpha{alpha}",
+        f"lr{lr}",
+        algo_clean
+    )
 
-        # 拼接完整路径
-        save_dir = os.path.join(config["system"]["res_root"],
-                                 config["system"]["dataset"],
-                                "alpha" + str(config["system"]["dirichlet_alpha"]),
-                                "lr" + str(config["client"]["lr"]),
-                                "beta" + str(config["system"]["extraction_beta"]),
-                                 config["client"]["fed_algo"].replace("ECGR", "")
-                                 )
-        # save_dir = os.path.join(config["system"]["res_root"])
+    # save_dir = os.path.join(config["system"]["res_root"])
 
-        os.makedirs(save_dir, exist_ok=True)
-        file_path = os.path.join(save_dir, file_name)
-        # 打开文件并写入
-        with open(file_path, "w") as jsfile:
-            json.dump(recorder.res, jsfile, cls=PythonObjectEncoder)
+    os.makedirs(save_dir, exist_ok=True)
+    file_path = os.path.join(save_dir, file_name)
+
+    with open(file_path, "w") as jsfile:
+        json.dump(recorder.res, jsfile, cls=PythonObjectEncoder)
 
 
 if __name__ == "__main__":
