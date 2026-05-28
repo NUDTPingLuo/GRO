@@ -1,14 +1,13 @@
 client:
-  batch_size: 128
-  fed_algo: FedAvgECGR
-  lr: 0.001
-  momentum: 0.9
+  batch_size: 64
+  fed_algo: FedProx
+  lr: 0.01
+  momentum: 0
   num_local_epoch: 1
 system:
-  dataset: MNIST
-  dirichlet_alpha: 0.01
-  extraction_beta: 0.2
-  i_seed: 2025
+  dataset: FashionMNIST
+  dirichlet_alpha: 0.1
+  i_seed: 42
   model: LeNet
   num_client: 10
   num_round: 100
